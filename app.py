@@ -5,13 +5,15 @@ from datetime import date, timedelta
 
 from flask import Flask, jsonify, request
 
+import config
+
 app = Flask(__name__)
 
 CURRENT_MEMBER = None
 
 
 def init_db():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     conn.executescript(
         """
         DROP TABLE IF EXISTS books;
@@ -73,7 +75,7 @@ def check(value, kind):
         except ValueError:
             return False
     elif kind == "member_type":
-        return value in ("student", "staff")
+        return value in config.MEMBER_TYPES
     return False
 
 
@@ -93,7 +95,7 @@ def notify(kind, title="", send=True):
     else:
         subject = "Library notice"
         body = title
-    with open("outbox.txt", "a") as f:
+    with open(config.OUTBOX_PATH, "a") as f:
         f.write("TO: " + CURRENT_MEMBER[2] + " | SUBJECT: " + subject + " | BODY: " + body + "\n")
 
 
@@ -102,7 +104,7 @@ def notify(kind, title="", send=True):
 
 @app.route("/books", methods=["GET"])
 def list_books():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     if request.args.get("available") == "true":
         rows = conn.execute("SELECT * FROM books WHERE available = 1").fetchall()
     else:
@@ -116,7 +118,7 @@ def list_books():
 
 @app.route("/books/<int:book_id>", methods=["GET"])
 def get_book(book_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     r = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
     conn.close()
     if r is None:
@@ -131,7 +133,7 @@ def create_book():
         return jsonify({"error": "title and author are required"}), 400
     if not check(data.get("isbn"), "isbn"):
         return jsonify({"error": "invalid isbn"}), 400
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     cur = conn.execute(
         "INSERT INTO books (title, author, isbn, available) VALUES (?, ?, ?, 1)",
         (data["title"], data["author"], data["isbn"]),
@@ -144,7 +146,7 @@ def create_book():
 
 @app.route("/books/<int:book_id>", methods=["DELETE"])
 def delete_book(book_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     r = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
     if r is None:
         conn.close()
@@ -163,7 +165,7 @@ def delete_book(book_id):
 
 @app.route("/members", methods=["GET"])
 def list_members():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute("SELECT * FROM members").fetchall()
     conn.close()
     result = []
@@ -174,7 +176,7 @@ def list_members():
 
 @app.route("/members/<int:member_id>", methods=["GET"])
 def get_member(member_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     r = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
     conn.close()
     if r is None:
@@ -192,7 +194,7 @@ def create_member():
     member_type = data.get("type", "student")
     if not check(member_type, "member_type"):
         return jsonify({"error": "type must be student or staff"}), 400
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     existing = conn.execute("SELECT * FROM members WHERE email = ?", (data["email"],)).fetchone()
     if existing is not None:
         conn.close()
@@ -209,7 +211,7 @@ def create_member():
 
 @app.route("/members/<int:member_id>/loans", methods=["GET"])
 def member_loans(member_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     m = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
     if m is None:
         conn.close()
@@ -224,7 +226,7 @@ def member_loans(member_id):
             open_loans += 1
             days_late = (date.today() - date.fromisoformat(loan[3])).days
             if days_late > 0:
-                owed += days_late * 0.5
+                owed += days_late * config.FINE_PER_DAY
         elif loan[6] == 0:
             owed += loan[5]
         loans.append(
@@ -238,9 +240,9 @@ def member_loans(member_id):
             }
         )
     if m[3] == "staff":
-        remaining = 5 - open_loans
+        remaining = config.LOAN_LIMITS["staff"] - open_loans
     else:
-        remaining = 3 - open_loans
+        remaining = config.LOAN_LIMITS["student"] - open_loans
     return jsonify({"loans": loans, "total_owed": money(owed), "loans_remaining": remaining})
 
 
@@ -249,7 +251,7 @@ def member_loans(member_id):
 
 @app.route("/loans", methods=["GET"])
 def list_loans():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute("SELECT * FROM loans").fetchall()
     conn.close()
     result = []
@@ -257,7 +259,7 @@ def list_loans():
         current_fine = loan[5]
         days_late = (date.today() - date.fromisoformat(loan[3])).days
         if loan[4] == 0:
-            current_fine = max(0, days_late) * 0.50
+            current_fine = max(0, days_late) * config.FINE_PER_DAY
         if request.args.get("overdue") == "true" and (loan[4] == 1 or days_late <= 0):
             continue
         result.append(
@@ -279,7 +281,7 @@ def list_loans():
 
 @app.route("/loans/<int:loan_id>", methods=["GET"])
 def get_loan(loan_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
     if loan is None:
@@ -287,7 +289,7 @@ def get_loan(loan_id):
     current_fine = loan[5]
     if loan[4] == 0:
         days_late = (date.today() - date.fromisoformat(loan[3])).days
-        current_fine = max(0, days_late) * 0.50
+        current_fine = max(0, days_late) * config.FINE_PER_DAY
     return jsonify(
         {
             "id": loan[0],
@@ -313,7 +315,7 @@ def create_loan():
     if data.get("due_date") and not check(data["due_date"], "date"):
         return jsonify({"error": "invalid due_date"}), 400
 
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     book = conn.execute("SELECT * FROM books WHERE id = ?", (data["book_id"],)).fetchone()
     if book is None:
         conn.close()
@@ -334,21 +336,21 @@ def create_loan():
             open_loans += 1
             days_late = (date.today() - date.fromisoformat(loan[3])).days
             if days_late > 0:
-                owed += days_late * 0.5
+                owed += days_late * config.FINE_PER_DAY
         elif loan[6] == 0:
             owed += loan[5]
     if owed > 0:
         conn.close()
         return jsonify({"error": "member has unpaid fines"}), 409
-    limit = 3
+    limit = config.LOAN_LIMITS["student"]
     if member[3] == "staff":
-        limit = 5
+        limit = config.LOAN_LIMITS["staff"]
     if open_loans >= limit:
         conn.close()
         return jsonify({"error": "loan limit reached"}), 409
 
     today = date.today()
-    due_date = data.get("due_date") or (today + timedelta(days=14)).isoformat()
+    due_date = data.get("due_date") or (today + timedelta(days=config.LOAN_DAYS)).isoformat()
     cur = conn.execute(
         "INSERT INTO loans (book_id, member_id, due_date, checked_out) VALUES (?, ?, ?, ?)",
         (data["book_id"], data["member_id"], due_date, today.isoformat()),
@@ -381,7 +383,7 @@ def create_loan():
 
 @app.route("/loans/<int:loan_id>/return", methods=["POST"])
 def return_book(loan_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     if loan is None:
         conn.close()
@@ -391,7 +393,7 @@ def return_book(loan_id):
         return jsonify({"error": "loan already returned"}), 409
 
     days_late = (date.today() - date.fromisoformat(loan[3])).days
-    fine = max(0, days_late) * 0.50
+    fine = max(0, days_late) * config.FINE_PER_DAY
     conn.execute("UPDATE loans SET returned = 1, fine = ? WHERE id = ?", (fine, loan_id))
     conn.execute("UPDATE books SET available = 1 WHERE id = ?", (loan[1],))
     conn.commit()
@@ -400,7 +402,7 @@ def return_book(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open("outbox.txt", "a") as f:
+    with open(config.OUTBOX_PATH, "a") as f:
         f.write(
             "TO: " + member[2] + " | SUBJECT: Book returned | BODY: You returned " + book[1]
             + ". Fine: $" + str(money(fine)) + "\n"
@@ -424,7 +426,7 @@ def return_book(loan_id):
 @app.route("/loans/<int:loan_id>/renew", methods=["POST"])
 def renew_loan(loan_id):
     global CURRENT_MEMBER
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     if loan is None:
         conn.close()
@@ -435,11 +437,11 @@ def renew_loan(loan_id):
     if date.fromisoformat(loan[3]) < date.today():
         conn.close()
         return jsonify({"error": "overdue loans cannot be renewed"}), 409
-    if loan[7] >= 1:
+    if loan[7] >= config.MAX_RENEWALS:
         conn.close()
         return jsonify({"error": "loan was already renewed"}), 409
 
-    new_due = (date.fromisoformat(loan[3]) + timedelta(days=14)).isoformat()
+    new_due = (date.fromisoformat(loan[3]) + timedelta(days=config.RENEWAL_DAYS)).isoformat()
     conn.execute("UPDATE loans SET due_date = ?, renewals = renewals + 1 WHERE id = ?", (new_due, loan_id))
     conn.commit()
     CURRENT_MEMBER = conn.execute("SELECT * FROM members WHERE id = ?", (loan[2],)).fetchone()
@@ -466,7 +468,7 @@ def renew_loan(loan_id):
 
 @app.route("/loans/<int:loan_id>/pay-fine", methods=["POST"])
 def pay_fine(loan_id):
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     if loan is None:
         conn.close()
@@ -484,7 +486,7 @@ def pay_fine(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open("outbox.txt", "a") as f:
+    with open(config.OUTBOX_PATH, "a") as f:
         f.write(
             "TO: " + member[2] + " | SUBJECT: Fine paid | BODY: We received $" + str(money(loan[5])) + "\n"
         )
@@ -509,7 +511,7 @@ def pay_fine(loan_id):
 
 @app.route("/reports/overdue", methods=["GET"])
 def report_overdue():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     rows = conn.execute(
         """
         SELECT loans.id, books.title, members.name, loans.due_date
@@ -525,7 +527,7 @@ def report_overdue():
     for r in rows:
         days_late = (date.today() - date.fromisoformat(r[3])).days
         if days_late > 0:
-            fine = days_late * 0.5
+            fine = days_late * config.FINE_PER_DAY
             total += fine
             items.append(
                 {"loan_id": r[0], "title": r[1], "member": r[2], "days_late": days_late, "fine": money(fine)}
@@ -535,7 +537,7 @@ def report_overdue():
 
 @app.route("/reports/summary", methods=["GET"])
 def report_summary():
-    conn = sqlite3.connect("library.db")
+    conn = sqlite3.connect(config.DB_PATH)
     total_books = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
     rows = conn.execute("SELECT * FROM loans").fetchall()
     conn.close()
@@ -545,11 +547,11 @@ def report_summary():
         if loan[4] == 0:
             on_loan += 1
             days_late = (date.today() - date.fromisoformat(loan[3])).days
-            outstanding += max(0, days_late) * 0.50
+            outstanding += max(0, days_late) * config.FINE_PER_DAY
         elif loan[6] == 0:
             outstanding += loan[5]
     return jsonify({"total_books": total_books, "on_loan": on_loan, "fines_outstanding": money(outstanding)})
 
 
-if not os.path.exists("library.db"):
+if not os.path.exists(config.DB_PATH):
     init_db()
