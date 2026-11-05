@@ -3,6 +3,7 @@ from datetime import date
 
 from flask import Flask, jsonify, request
 
+import books
 import config
 import notifications
 import repository
@@ -12,47 +13,9 @@ import validation
 from db import init_db
 
 app = Flask(__name__)
+app.register_blueprint(books.bp)
 
 # ---------- helpers ----------
-
-
-# ---------- books ----------
-
-
-@app.route("/books", methods=["GET"])
-def list_books():
-    books = repository.list_books(only_available=request.args.get("available") == "true")
-    return jsonify([serializers.book_to_json(book) for book in books])
-
-
-@app.route("/books/<int:book_id>", methods=["GET"])
-def get_book(book_id):
-    book = repository.get_book(book_id)
-    if book is None:
-        return jsonify({"error": "book not found"}), 404
-    return jsonify(serializers.book_to_json(book))
-
-
-@app.route("/books", methods=["POST"])
-def create_book():
-    data = request.get_json(silent=True) or {}
-    if not data.get("title") or not data.get("author"):
-        return jsonify({"error": "title and author are required"}), 400
-    if not validation.is_valid_isbn(data.get("isbn")):
-        return jsonify({"error": "invalid isbn"}), 400
-    book = repository.create_book(data["title"], data["author"], data["isbn"])
-    return jsonify(serializers.book_to_json(book)), 201
-
-
-@app.route("/books/<int:book_id>", methods=["DELETE"])
-def delete_book(book_id):
-    book = repository.get_book(book_id)
-    if book is None:
-        return jsonify({"error": "book not found"}), 404
-    if not book["available"]:
-        return jsonify({"error": "book is on loan"}), 409
-    repository.delete_book(book_id)
-    return "", 204
 
 
 # ---------- members ----------
