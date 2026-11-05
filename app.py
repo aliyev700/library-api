@@ -5,6 +5,7 @@ from flask import Flask, jsonify, request
 
 import config
 import db
+import notifications
 import rules
 import serializers
 import validation
@@ -12,26 +13,7 @@ from db import init_db
 
 app = Flask(__name__)
 
-CURRENT_MEMBER = None
-
-
 # ---------- helpers ----------
-
-
-def notify(kind, title="", send=True):
-    if not send:
-        return
-    if kind == "checkout":
-        subject = "Book checked out"
-        body = "You checked out " + title
-    elif kind == "renew":
-        subject = "Loan renewed"
-        body = "You renewed " + title
-    else:
-        subject = "Library notice"
-        body = title
-    with open(config.OUTBOX_PATH, "a") as f:
-        f.write("TO: " + CURRENT_MEMBER["email"] + " | SUBJECT: " + subject + " | BODY: " + body + "\n")
 
 
 # ---------- books ----------
@@ -192,7 +174,6 @@ def get_loan(loan_id):
 
 @app.route("/loans", methods=["POST"])
 def create_loan():
-    global CURRENT_MEMBER
     data = request.get_json(silent=True) or {}
     if not data.get("book_id") or not data.get("member_id"):
         return jsonify({"error": "book_id and member_id are required"}), 400
@@ -229,8 +210,7 @@ def create_loan():
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (cur.lastrowid,)).fetchone()
     conn.close()
 
-    CURRENT_MEMBER = member
-    notify("checkout", book["title"])
+    notifications.book_checked_out(member["email"], book["title"])
 
     return jsonify(serializers.loan_to_json(loan)), 201
 
@@ -255,18 +235,13 @@ def return_book(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open(config.OUTBOX_PATH, "a") as f:
-        f.write(
-            "TO: " + member["email"] + " | SUBJECT: Book returned | BODY: You returned " + book["title"]
-            + ". Fine: $" + str(rules.money(fine)) + "\n"
-        )
+    notifications.book_returned(member["email"], book["title"], fine)
 
     return jsonify(serializers.loan_to_json(updated))
 
 
 @app.route("/loans/<int:loan_id>/renew", methods=["POST"])
 def renew_loan(loan_id):
-    global CURRENT_MEMBER
     conn = db.connect()
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     if loan is None:
@@ -280,12 +255,12 @@ def renew_loan(loan_id):
     new_due = rules.renewed_due_date(loan["due_date"])
     conn.execute("UPDATE loans SET due_date = ?, renewals = renewals + 1 WHERE id = ?", (new_due, loan_id))
     conn.commit()
-    CURRENT_MEMBER = conn.execute("SELECT * FROM members WHERE id = ?", (loan["member_id"],)).fetchone()
+    member = conn.execute("SELECT * FROM members WHERE id = ?", (loan["member_id"],)).fetchone()
     book = conn.execute("SELECT * FROM books WHERE id = ?", (loan["book_id"],)).fetchone()
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    notify("renew", book["title"])
+    notifications.loan_renewed(member["email"], book["title"])
 
     return jsonify(serializers.loan_to_json(updated))
 
@@ -308,10 +283,7 @@ def pay_fine(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open(config.OUTBOX_PATH, "a") as f:
-        f.write(
-            "TO: " + member["email"] + " | SUBJECT: Fine paid | BODY: We received $" + str(rules.money(loan["fine"])) + "\n"
-        )
+    notifications.fine_paid(member["email"], loan["fine"])
 
     return jsonify(serializers.loan_to_json(updated))
 
