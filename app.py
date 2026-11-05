@@ -6,6 +6,7 @@ from flask import Flask, jsonify, request
 import config
 import db
 import rules
+import serializers
 import validation
 from db import init_db
 
@@ -46,7 +47,7 @@ def list_books():
     conn.close()
     result = []
     for r in rows:
-        result.append({"id": r["id"], "title": r["title"], "author": r["author"], "isbn": r["isbn"], "available": bool(r["available"])})
+        result.append(serializers.book_to_json(r))
     return jsonify(result)
 
 
@@ -57,7 +58,7 @@ def get_book(book_id):
     conn.close()
     if r is None:
         return jsonify({"error": "book not found"}), 404
-    return jsonify({"id": r["id"], "title": r["title"], "author": r["author"], "isbn": r["isbn"], "available": bool(r["available"])})
+    return jsonify(serializers.book_to_json(r))
 
 
 @app.route("/books", methods=["POST"])
@@ -75,7 +76,7 @@ def create_book():
     conn.commit()
     r = conn.execute("SELECT * FROM books WHERE id = ?", (cur.lastrowid,)).fetchone()
     conn.close()
-    return jsonify({"id": r["id"], "title": r["title"], "author": r["author"], "isbn": r["isbn"], "available": bool(r["available"])}), 201
+    return jsonify(serializers.book_to_json(r)), 201
 
 
 @app.route("/books/<int:book_id>", methods=["DELETE"])
@@ -104,7 +105,7 @@ def list_members():
     conn.close()
     result = []
     for r in rows:
-        result.append({"id": r["id"], "name": r["name"], "email": r["email"], "type": r["type"]})
+        result.append(serializers.member_to_json(r))
     return jsonify(result)
 
 
@@ -115,7 +116,7 @@ def get_member(member_id):
     conn.close()
     if r is None:
         return jsonify({"error": "member not found"}), 404
-    return jsonify({"id": r["id"], "name": r["name"], "email": r["email"], "type": r["type"]})
+    return jsonify(serializers.member_to_json(r))
 
 
 @app.route("/members", methods=["POST"])
@@ -140,7 +141,7 @@ def create_member():
     conn.commit()
     r = conn.execute("SELECT * FROM members WHERE id = ?", (cur.lastrowid,)).fetchone()
     conn.close()
-    return jsonify({"id": r["id"], "name": r["name"], "email": r["email"], "type": r["type"]}), 201
+    return jsonify(serializers.member_to_json(r)), 201
 
 
 @app.route("/members/<int:member_id>/loans", methods=["GET"])
@@ -154,16 +155,7 @@ def member_loans(member_id):
     conn.close()
     loans = []
     for loan in rows:
-        loans.append(
-            {
-                "id": loan["id"],
-                "book_id": loan["book_id"],
-                "due_date": loan["due_date"],
-                "returned": bool(loan["returned"]),
-                "fine": rules.money(loan["fine"]),
-                "fine_paid": bool(loan["fine_paid"]),
-            }
-        )
+        loans.append(serializers.member_loan_to_json(loan))
     owed = rules.amount_owed(rows, date.today())
     remaining = rules.loans_remaining(rows, m["type"])
     return jsonify({"loans": loans, "total_owed": rules.money(owed), "loans_remaining": remaining})
@@ -183,20 +175,7 @@ def list_loans():
         current_fine = rules.current_fine(loan, today)
         if request.args.get("overdue") == "true" and not rules.is_overdue(loan, today):
             continue
-        result.append(
-            {
-                "id": loan["id"],
-                "book_id": loan["book_id"],
-                "member_id": loan["member_id"],
-                "due_date": loan["due_date"],
-                "returned": bool(loan["returned"]),
-                "fine": rules.money(loan["fine"]),
-                "fine_paid": bool(loan["fine_paid"]),
-                "renewals": loan["renewals"],
-                "checked_out": loan["checked_out"],
-                "current_fine": rules.money(current_fine),
-            }
-        )
+        result.append(serializers.loan_to_json(loan, current_fine))
     return jsonify(result)
 
 
@@ -208,20 +187,7 @@ def get_loan(loan_id):
     if loan is None:
         return jsonify({"error": "loan not found"}), 404
     current_fine = rules.current_fine(loan, date.today())
-    return jsonify(
-        {
-            "id": loan["id"],
-            "book_id": loan["book_id"],
-            "member_id": loan["member_id"],
-            "due_date": loan["due_date"],
-            "returned": bool(loan["returned"]),
-            "fine": rules.money(loan["fine"]),
-            "fine_paid": bool(loan["fine_paid"]),
-            "renewals": loan["renewals"],
-            "checked_out": loan["checked_out"],
-            "current_fine": rules.money(current_fine),
-        }
-    )
+    return jsonify(serializers.loan_to_json(loan, current_fine))
 
 
 @app.route("/loans", methods=["POST"])
@@ -266,22 +232,7 @@ def create_loan():
     CURRENT_MEMBER = member
     notify("checkout", book["title"])
 
-    return (
-        jsonify(
-            {
-                "id": loan["id"],
-                "book_id": loan["book_id"],
-                "member_id": loan["member_id"],
-                "due_date": loan["due_date"],
-                "returned": bool(loan["returned"]),
-                "fine": rules.money(loan["fine"]),
-                "fine_paid": bool(loan["fine_paid"]),
-                "renewals": loan["renewals"],
-                "checked_out": loan["checked_out"],
-            }
-        ),
-        201,
-    )
+    return jsonify(serializers.loan_to_json(loan)), 201
 
 
 @app.route("/loans/<int:loan_id>/return", methods=["POST"])
@@ -310,19 +261,7 @@ def return_book(loan_id):
             + ". Fine: $" + str(rules.money(fine)) + "\n"
         )
 
-    return jsonify(
-        {
-            "id": updated["id"],
-            "book_id": updated["book_id"],
-            "member_id": updated["member_id"],
-            "due_date": updated["due_date"],
-            "returned": bool(updated["returned"]),
-            "fine": rules.money(updated["fine"]),
-            "fine_paid": bool(updated["fine_paid"]),
-            "renewals": updated["renewals"],
-            "checked_out": updated["checked_out"],
-        }
-    )
+    return jsonify(serializers.loan_to_json(updated))
 
 
 @app.route("/loans/<int:loan_id>/renew", methods=["POST"])
@@ -348,19 +287,7 @@ def renew_loan(loan_id):
 
     notify("renew", book["title"])
 
-    return jsonify(
-        {
-            "id": updated["id"],
-            "book_id": updated["book_id"],
-            "member_id": updated["member_id"],
-            "due_date": updated["due_date"],
-            "returned": bool(updated["returned"]),
-            "fine": rules.money(updated["fine"]),
-            "fine_paid": bool(updated["fine_paid"]),
-            "renewals": updated["renewals"],
-            "checked_out": updated["checked_out"],
-        }
-    )
+    return jsonify(serializers.loan_to_json(updated))
 
 
 @app.route("/loans/<int:loan_id>/pay-fine", methods=["POST"])
@@ -386,19 +313,7 @@ def pay_fine(loan_id):
             "TO: " + member["email"] + " | SUBJECT: Fine paid | BODY: We received $" + str(rules.money(loan["fine"])) + "\n"
         )
 
-    return jsonify(
-        {
-            "id": updated["id"],
-            "book_id": updated["book_id"],
-            "member_id": updated["member_id"],
-            "due_date": updated["due_date"],
-            "returned": bool(updated["returned"]),
-            "fine": rules.money(updated["fine"]),
-            "fine_paid": bool(updated["fine_paid"]),
-            "renewals": updated["renewals"],
-            "checked_out": updated["checked_out"],
-        }
-    )
+    return jsonify(serializers.loan_to_json(updated))
 
 
 # ---------- reports ----------
@@ -424,15 +339,7 @@ def report_overdue():
         if rules.is_late(r["due_date"], today):
             fine = rules.fine_for(r["due_date"], today)
             total += fine
-            items.append(
-                {
-                    "loan_id": r["id"],
-                    "title": r["title"],
-                    "member": r["name"],
-                    "days_late": rules.days_late(r["due_date"], today),
-                    "fine": rules.money(fine),
-                }
-            )
+            items.append(serializers.overdue_item_to_json(r, rules.days_late(r["due_date"], today), fine))
     return jsonify({"items": items, "total_fines": rules.money(total)})
 
 
