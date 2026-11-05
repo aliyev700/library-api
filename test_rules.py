@@ -1,4 +1,5 @@
 """Unit tests for the library rules. No HTTP server and no database."""
+import subprocess
 import sys
 import unittest
 from datetime import date
@@ -103,8 +104,6 @@ class DueDateTests(unittest.TestCase):
 
 class IsolationTests(unittest.TestCase):
     def test_rules_do_not_load_flask_or_sqlite(self):
-        import subprocess
-
         code = "import sys, rules; print('flask' in sys.modules or 'sqlite3' in sys.modules)"
         output = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
         self.assertEqual(output.strip(), "False")
