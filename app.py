@@ -1,5 +1,4 @@
 import os
-import re
 from datetime import date
 
 from flask import Flask, jsonify, request
@@ -7,6 +6,7 @@ from flask import Flask, jsonify, request
 import config
 import db
 import rules
+import validation
 from db import init_db
 
 app = Flask(__name__)
@@ -15,23 +15,6 @@ CURRENT_MEMBER = None
 
 
 # ---------- helpers ----------
-
-
-def check(value, kind):
-    if kind == "email":
-        return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str(value)) is not None
-    elif kind == "isbn":
-        digits = str(value).replace("-", "")
-        return digits.isdigit() and len(digits) in (10, 13)
-    elif kind == "date":
-        try:
-            date.fromisoformat(str(value))
-            return True
-        except ValueError:
-            return False
-    elif kind == "member_type":
-        return value in config.MEMBER_TYPES
-    return False
 
 
 def notify(kind, title="", send=True):
@@ -82,7 +65,7 @@ def create_book():
     data = request.get_json(silent=True) or {}
     if not data.get("title") or not data.get("author"):
         return jsonify({"error": "title and author are required"}), 400
-    if not check(data.get("isbn"), "isbn"):
+    if not validation.is_valid_isbn(data.get("isbn")):
         return jsonify({"error": "invalid isbn"}), 400
     conn = db.connect()
     cur = conn.execute(
@@ -140,10 +123,10 @@ def create_member():
     data = request.get_json(silent=True) or {}
     if not data.get("name"):
         return jsonify({"error": "name is required"}), 400
-    if not check(data.get("email"), "email"):
+    if not validation.is_valid_email(data.get("email")):
         return jsonify({"error": "invalid email"}), 400
     member_type = data.get("type", "student")
-    if not check(member_type, "member_type"):
+    if not validation.is_valid_member_type(member_type):
         return jsonify({"error": "type must be student or staff"}), 400
     conn = db.connect()
     existing = conn.execute("SELECT * FROM members WHERE email = ?", (data["email"],)).fetchone()
@@ -247,7 +230,7 @@ def create_loan():
     data = request.get_json(silent=True) or {}
     if not data.get("book_id") or not data.get("member_id"):
         return jsonify({"error": "book_id and member_id are required"}), 400
-    if data.get("due_date") and not check(data["due_date"], "date"):
+    if data.get("due_date") and not validation.is_valid_date(data["due_date"]):
         return jsonify({"error": "invalid due_date"}), 400
 
     conn = db.connect()
