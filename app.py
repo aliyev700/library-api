@@ -1,11 +1,12 @@
 import os
 import re
-from datetime import date, timedelta
+from datetime import date
 
 from flask import Flask, jsonify, request
 
 import config
 import db
+import rules
 from db import init_db
 
 app = Flask(__name__)
@@ -31,10 +32,6 @@ def check(value, kind):
     elif kind == "member_type":
         return value in config.MEMBER_TYPES
     return False
-
-
-def money(x):
-    return round(float(x), 2)
 
 
 def notify(kind, title="", send=True):
@@ -172,32 +169,21 @@ def member_loans(member_id):
         return jsonify({"error": "member not found"}), 404
     rows = conn.execute("SELECT * FROM loans WHERE member_id = ?", (member_id,)).fetchall()
     conn.close()
-    owed = 0
-    open_loans = 0
     loans = []
     for loan in rows:
-        if loan["returned"] == 0:
-            open_loans += 1
-            days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-            if days_late > 0:
-                owed += days_late * config.FINE_PER_DAY
-        elif loan["fine_paid"] == 0:
-            owed += loan["fine"]
         loans.append(
             {
                 "id": loan["id"],
                 "book_id": loan["book_id"],
                 "due_date": loan["due_date"],
                 "returned": bool(loan["returned"]),
-                "fine": money(loan["fine"]),
+                "fine": rules.money(loan["fine"]),
                 "fine_paid": bool(loan["fine_paid"]),
             }
         )
-    if m["type"] == "staff":
-        remaining = config.LOAN_LIMITS["staff"] - open_loans
-    else:
-        remaining = config.LOAN_LIMITS["student"] - open_loans
-    return jsonify({"loans": loans, "total_owed": money(owed), "loans_remaining": remaining})
+    owed = rules.amount_owed(rows, date.today())
+    remaining = rules.loans_remaining(rows, m["type"])
+    return jsonify({"loans": loans, "total_owed": rules.money(owed), "loans_remaining": remaining})
 
 
 # ---------- loans ----------
@@ -208,13 +194,11 @@ def list_loans():
     conn = db.connect()
     rows = conn.execute("SELECT * FROM loans").fetchall()
     conn.close()
+    today = date.today()
     result = []
     for loan in rows:
-        current_fine = loan["fine"]
-        days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-        if loan["returned"] == 0:
-            current_fine = max(0, days_late) * config.FINE_PER_DAY
-        if request.args.get("overdue") == "true" and (loan["returned"] == 1 or days_late <= 0):
+        current_fine = rules.current_fine(loan, today)
+        if request.args.get("overdue") == "true" and not rules.is_overdue(loan, today):
             continue
         result.append(
             {
@@ -223,11 +207,11 @@ def list_loans():
                 "member_id": loan["member_id"],
                 "due_date": loan["due_date"],
                 "returned": bool(loan["returned"]),
-                "fine": money(loan["fine"]),
+                "fine": rules.money(loan["fine"]),
                 "fine_paid": bool(loan["fine_paid"]),
                 "renewals": loan["renewals"],
                 "checked_out": loan["checked_out"],
-                "current_fine": money(current_fine),
+                "current_fine": rules.money(current_fine),
             }
         )
     return jsonify(result)
@@ -240,10 +224,7 @@ def get_loan(loan_id):
     conn.close()
     if loan is None:
         return jsonify({"error": "loan not found"}), 404
-    current_fine = loan["fine"]
-    if loan["returned"] == 0:
-        days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-        current_fine = max(0, days_late) * config.FINE_PER_DAY
+    current_fine = rules.current_fine(loan, date.today())
     return jsonify(
         {
             "id": loan["id"],
@@ -251,11 +232,11 @@ def get_loan(loan_id):
             "member_id": loan["member_id"],
             "due_date": loan["due_date"],
             "returned": bool(loan["returned"]),
-            "fine": money(loan["fine"]),
+            "fine": rules.money(loan["fine"]),
             "fine_paid": bool(loan["fine_paid"]),
             "renewals": loan["renewals"],
             "checked_out": loan["checked_out"],
-            "current_fine": money(current_fine),
+            "current_fine": rules.money(current_fine),
         }
     )
 
@@ -283,28 +264,13 @@ def create_loan():
         return jsonify({"error": "book is not available"}), 409
 
     rows = conn.execute("SELECT * FROM loans WHERE member_id = ?", (data["member_id"],)).fetchall()
-    owed = 0
-    open_loans = 0
-    for loan in rows:
-        if loan["returned"] == 0:
-            open_loans += 1
-            days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-            if days_late > 0:
-                owed += days_late * config.FINE_PER_DAY
-        elif loan["fine_paid"] == 0:
-            owed += loan["fine"]
-    if owed > 0:
-        conn.close()
-        return jsonify({"error": "member has unpaid fines"}), 409
-    limit = config.LOAN_LIMITS["student"]
-    if member["type"] == "staff":
-        limit = config.LOAN_LIMITS["staff"]
-    if open_loans >= limit:
-        conn.close()
-        return jsonify({"error": "loan limit reached"}), 409
-
     today = date.today()
-    due_date = data.get("due_date") or (today + timedelta(days=config.LOAN_DAYS)).isoformat()
+    blocked = rules.checkout_block(rows, member["type"], today)
+    if blocked:
+        conn.close()
+        return jsonify({"error": blocked}), 409
+
+    due_date = data.get("due_date") or rules.default_due_date(today)
     cur = conn.execute(
         "INSERT INTO loans (book_id, member_id, due_date, checked_out) VALUES (?, ?, ?, ?)",
         (data["book_id"], data["member_id"], due_date, today.isoformat()),
@@ -325,7 +291,7 @@ def create_loan():
                 "member_id": loan["member_id"],
                 "due_date": loan["due_date"],
                 "returned": bool(loan["returned"]),
-                "fine": money(loan["fine"]),
+                "fine": rules.money(loan["fine"]),
                 "fine_paid": bool(loan["fine_paid"]),
                 "renewals": loan["renewals"],
                 "checked_out": loan["checked_out"],
@@ -346,8 +312,7 @@ def return_book(loan_id):
         conn.close()
         return jsonify({"error": "loan already returned"}), 409
 
-    days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-    fine = max(0, days_late) * config.FINE_PER_DAY
+    fine = rules.fine_for(loan["due_date"], date.today())
     conn.execute("UPDATE loans SET returned = 1, fine = ? WHERE id = ?", (fine, loan_id))
     conn.execute("UPDATE books SET available = 1 WHERE id = ?", (loan["book_id"],))
     conn.commit()
@@ -359,7 +324,7 @@ def return_book(loan_id):
     with open(config.OUTBOX_PATH, "a") as f:
         f.write(
             "TO: " + member["email"] + " | SUBJECT: Book returned | BODY: You returned " + book["title"]
-            + ". Fine: $" + str(money(fine)) + "\n"
+            + ". Fine: $" + str(rules.money(fine)) + "\n"
         )
 
     return jsonify(
@@ -369,7 +334,7 @@ def return_book(loan_id):
             "member_id": updated["member_id"],
             "due_date": updated["due_date"],
             "returned": bool(updated["returned"]),
-            "fine": money(updated["fine"]),
+            "fine": rules.money(updated["fine"]),
             "fine_paid": bool(updated["fine_paid"]),
             "renewals": updated["renewals"],
             "checked_out": updated["checked_out"],
@@ -385,17 +350,12 @@ def renew_loan(loan_id):
     if loan is None:
         conn.close()
         return jsonify({"error": "loan not found"}), 404
-    if loan["returned"] == 1:
+    blocked = rules.renewal_block(loan, date.today())
+    if blocked:
         conn.close()
-        return jsonify({"error": "loan already returned"}), 409
-    if date.fromisoformat(loan["due_date"]) < date.today():
-        conn.close()
-        return jsonify({"error": "overdue loans cannot be renewed"}), 409
-    if loan["renewals"] >= config.MAX_RENEWALS:
-        conn.close()
-        return jsonify({"error": "loan was already renewed"}), 409
+        return jsonify({"error": blocked}), 409
 
-    new_due = (date.fromisoformat(loan["due_date"]) + timedelta(days=config.RENEWAL_DAYS)).isoformat()
+    new_due = rules.renewed_due_date(loan["due_date"])
     conn.execute("UPDATE loans SET due_date = ?, renewals = renewals + 1 WHERE id = ?", (new_due, loan_id))
     conn.commit()
     CURRENT_MEMBER = conn.execute("SELECT * FROM members WHERE id = ?", (loan["member_id"],)).fetchone()
@@ -412,7 +372,7 @@ def renew_loan(loan_id):
             "member_id": updated["member_id"],
             "due_date": updated["due_date"],
             "returned": bool(updated["returned"]),
-            "fine": money(updated["fine"]),
+            "fine": rules.money(updated["fine"]),
             "fine_paid": bool(updated["fine_paid"]),
             "renewals": updated["renewals"],
             "checked_out": updated["checked_out"],
@@ -427,12 +387,10 @@ def pay_fine(loan_id):
     if loan is None:
         conn.close()
         return jsonify({"error": "loan not found"}), 404
-    if loan["returned"] == 0:
+    blocked = rules.payment_block(loan)
+    if blocked:
         conn.close()
-        return jsonify({"error": "return the book before paying"}), 409
-    if loan["fine"] <= 0 or loan["fine_paid"] == 1:
-        conn.close()
-        return jsonify({"error": "no fine to pay"}), 409
+        return jsonify({"error": blocked}), 409
 
     conn.execute("UPDATE loans SET fine_paid = 1 WHERE id = ?", (loan_id,))
     conn.commit()
@@ -442,7 +400,7 @@ def pay_fine(loan_id):
 
     with open(config.OUTBOX_PATH, "a") as f:
         f.write(
-            "TO: " + member["email"] + " | SUBJECT: Fine paid | BODY: We received $" + str(money(loan["fine"])) + "\n"
+            "TO: " + member["email"] + " | SUBJECT: Fine paid | BODY: We received $" + str(rules.money(loan["fine"])) + "\n"
         )
 
     return jsonify(
@@ -452,7 +410,7 @@ def pay_fine(loan_id):
             "member_id": updated["member_id"],
             "due_date": updated["due_date"],
             "returned": bool(updated["returned"]),
-            "fine": money(updated["fine"]),
+            "fine": rules.money(updated["fine"]),
             "fine_paid": bool(updated["fine_paid"]),
             "renewals": updated["renewals"],
             "checked_out": updated["checked_out"],
@@ -476,17 +434,23 @@ def report_overdue():
         """
     ).fetchall()
     conn.close()
+    today = date.today()
     items = []
     total = 0
     for r in rows:
-        days_late = (date.today() - date.fromisoformat(r["due_date"])).days
-        if days_late > 0:
-            fine = days_late * config.FINE_PER_DAY
+        if rules.is_late(r["due_date"], today):
+            fine = rules.fine_for(r["due_date"], today)
             total += fine
             items.append(
-                {"loan_id": r["id"], "title": r["title"], "member": r["name"], "days_late": days_late, "fine": money(fine)}
+                {
+                    "loan_id": r["id"],
+                    "title": r["title"],
+                    "member": r["name"],
+                    "days_late": rules.days_late(r["due_date"], today),
+                    "fine": rules.money(fine),
+                }
             )
-    return jsonify({"items": items, "total_fines": money(total)})
+    return jsonify({"items": items, "total_fines": rules.money(total)})
 
 
 @app.route("/reports/summary", methods=["GET"])
@@ -495,16 +459,9 @@ def report_summary():
     total_books = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
     rows = conn.execute("SELECT * FROM loans").fetchall()
     conn.close()
-    on_loan = 0
-    outstanding = 0
-    for loan in rows:
-        if loan["returned"] == 0:
-            on_loan += 1
-            days_late = (date.today() - date.fromisoformat(loan["due_date"])).days
-            outstanding += max(0, days_late) * config.FINE_PER_DAY
-        elif loan["fine_paid"] == 0:
-            outstanding += loan["fine"]
-    return jsonify({"total_books": total_books, "on_loan": on_loan, "fines_outstanding": money(outstanding)})
+    on_loan = rules.open_loan_count(rows)
+    outstanding = rules.amount_owed(rows, date.today())
+    return jsonify({"total_books": total_books, "on_loan": on_loan, "fines_outstanding": rules.money(outstanding)})
 
 
 if not os.path.exists(config.DB_PATH):
